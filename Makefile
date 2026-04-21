@@ -10,7 +10,8 @@ upload: compile
 .PHONY: upload
 
 serial: compile
-	arduino-cli upload -b ${BOARD} --port /dev/ttyUSB0 sketch
+	arduino-cli upload -b ${BOARD} --port ${PORT} sketch
+.PHONY: serial
 
 deps:
 	arduino-cli core update-index
