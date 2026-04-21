@@ -4,18 +4,17 @@
 #include <Adafruit_MLX90614.h>
 #include <PulseSensorPlayground.h>
 
-#define I2C_SDA_PIN         (4)        // analog
-#define I2C_SCL_PIN         (5)        // analog
-#define PULSE_PIN           (0)        // analog
-#define RESTART_PIN         (9)        // digital
-#define BUZZER_PIN          (6)        // digital
-#define USS_TRIG_PIN        (2)        // digital
-#define USS_ECHO_PIN        (3)        // digital
-#define LED_PULSE_PIN       (10)       // digital
-#define LED_NORM_PIN        (8)        // digital
-#define LED_WARN_PIN        (7)        // digital
-#define LED_READY_PIN       (12)       // digital
-#define LED_ERROR_PIN       (13)       // digital
+#define PULSE_PIN        (PIN_A0)      // analog
+#define BUZZER_PIN       (6)           // digital
+#define RESTART_PIN      (9)           // digital
+#define USS_TRIG_PIN     (2)           // digital
+#define USS_ECHO_PIN     (3)           // digital
+#define LED_PULSE_PIN    (10)          // digital
+#define LED_NORM_PIN     (8)           // digital
+#define LED_WARN_PIN     (7)           // digital
+#define LED_READY_PIN    (4)           // digital
+#define LED_ERROR_PIN    (5)           // digital
+#define LED_STATE_PIN    (LED_BUILTIN) // digital
 
 #define USS_DURATION     (10)        // us
 #define USS_ECHO_TIMEOUT (30 * 1000) // ms
@@ -27,7 +26,6 @@
 
 #define TEMP_HIGH  (37.0)
 #define TEMP_LOW   (30.0)
-#define TEMP_CALIB (2.5)
 
 #define PULSE_THRESHOLD (500)
 #define PULSE_BPM_LOW   (60)
@@ -63,11 +61,13 @@ char *state_string(State state) {
 
 void state_set(State state) {
 	if (state_current == state) return;
+	digitalWrite(LED_STATE_PIN, HIGH);
 	Serial.print("State change: ");
 	Serial.print(state_string(state_current));
 	Serial.print(" -> ");
 	Serial.println(state_string(state));
 	state_current = state;
+	digitalWrite(LED_STATE_PIN, LOW);
 }
 
 LCD_I2C lcd = LCD_I2C(LCD_ADDR, LCD_COLS, LCD_ROWS);
@@ -81,7 +81,7 @@ unsigned long melody_bad_durations[]    = { 120, 120, 200, 120, 300 };
 unsigned int melody_good[]              = { 262, 330, 392, 523, 392, 523 };
 unsigned long melody_good_durations[]   = { 150, 150, 150, 250, 150, 300 };
 
-void play_melody(unsigned int *melody, unsigned long *durations, size_t len) {
+void melody_play(unsigned int *melody, unsigned long *durations, size_t len) {
 	for (size_t i = 0; i < len; i++) {
 		tone(BUZZER_PIN, melody[i], durations[i]);
 		delay(durations[i] * 1.3);
@@ -94,7 +94,7 @@ unsigned long heart_last_animation = 0;
 unsigned char heart_char_big[8]   = { 0x00, 0x1b, 0x1f, 0x1f, 0x1f, 0x0e, 0x04, 0x00 };
 unsigned char heart_char_small[8] = { 0x00, 0x0a, 0x1f, 0x1f, 0x0e, 0x04, 0x00, 0x00 };
 
-void ready_display() {
+void display_ready() {
 	if (millis() - heart_last_animation < 400) return;
 	heart_shape = !heart_shape;
 	lcd.setCursor(0, 0);
@@ -110,7 +110,7 @@ void ready_display() {
 	heart_last_animation = millis();
 }
 
-void reset_display() {
+void display_reset() {
 	lcd.clear();
 	digitalWrite(LED_NORM_PIN, LOW);
 	digitalWrite(LED_WARN_PIN, LOW);
@@ -131,6 +131,7 @@ void setup() {
 	Serial.begin(9600);
 	while (!Serial);
 
+	pinMode(LED_STATE_PIN, OUTPUT);
 	pinMode(LED_READY_PIN, OUTPUT);
 	pinMode(LED_ERROR_PIN, OUTPUT);
 	pinMode(LED_NORM_PIN, OUTPUT);
@@ -158,12 +159,12 @@ void setup() {
 		delay(250);
 	}
 
-	lcd.begin(I2C_SDA_PIN, I2C_SCL_PIN, false);
+	lcd.begin(PIN_WIRE_SDA, PIN_WIRE_SCL, false);
 	lcd.backlight();
 	lcd.createChar(0, heart_char_small);
 	lcd.createChar(1, heart_char_big);
 
-	reset_display();
+	display_reset();
 	state_set(STATE_READY);
 }
 
@@ -175,11 +176,14 @@ unsigned long output_start_time = 0;
 
 void loop() {
 	if (digitalRead(RESTART_PIN) == LOW) {
+		// debounce
 		delay(50);
 		if (digitalRead(RESTART_PIN) == LOW) {
+			digitalWrite(LED_ERROR_PIN, HIGH);
 			state_set(STATE_RESET);
 			// wait release
 			while (digitalRead(RESTART_PIN) == LOW);
+			digitalWrite(LED_ERROR_PIN, LOW);
 		}
 	}
 	switch (state_current) {
@@ -193,7 +197,12 @@ void loop() {
 		delay(250);
 		break;
 	case STATE_RESET:
-		reset_display();
+		current_temp = 0.0;
+		current_bpm = 0;
+		pulse_new = false;
+		pulse_start_time = 0;
+		output_start_time = 0;
+		display_reset();
 		state_set(STATE_READY);
 		break;
 	case STATE_READY: {
@@ -201,17 +210,17 @@ void loop() {
 		double distance = uss_get_distance();
 		if (distance > 0 && distance <= USS_MIN_DISTANCE) {
 			digitalWrite(LED_READY_PIN, LOW);
-			play_melody(melody_detect, melody_detect_durations, LENGTH(melody_detect));
-			reset_display();
+			melody_play(melody_detect, melody_detect_durations, LENGTH(melody_detect));
+			display_reset();
 			state_set(STATE_RUN_TEMP);
 			break;
 		}
-		ready_display();
+		display_ready();
 		break;
 	}
 	case STATE_RUN_TEMP:
 		delay(250);
-		current_temp = mlx.readObjectTempC() + TEMP_CALIB;
+		current_temp = mlx.readObjectTempC();
 		lcd.setCursor(0, 0);
 		lcd.print("Temp: ");
 		lcd.print(current_temp, 1);
@@ -225,7 +234,7 @@ void loop() {
 		break;
 	case STATE_RUN_PULSE:
 		lcd.setCursor(0, 1);
-		lcd.print("Measuring...    ");
+		lcd.print("  Measuring...  ");
 		if (pulse.sawStartOfBeat()) {
 			current_bpm = pulse.getBeatsPerMinute();
 			if (pulse_new) {
@@ -257,15 +266,15 @@ void loop() {
 			output_start_time = millis();
 			if (current_temp >= TEMP_LOW && current_temp < TEMP_HIGH && current_bpm >= PULSE_BPM_LOW && current_bpm <= PULSE_BPM_HIGH) {
 				digitalWrite(LED_NORM_PIN, HIGH);
-				play_melody(melody_good, melody_good_durations, LENGTH(melody_good));
+				melody_play(melody_good, melody_good_durations, LENGTH(melody_good));
 			} else {
 				digitalWrite(LED_WARN_PIN, HIGH);
-				play_melody(melody_bad, melody_bad_durations, LENGTH(melody_bad));
+				melody_play(melody_bad, melody_bad_durations, LENGTH(melody_bad));
 			}
 		}
 		if (millis() - output_start_time > 5000) {
 			output_start_time = 0;
-			reset_display();
+			display_reset();
 			state_set(STATE_READY);
 		}
 		break;
