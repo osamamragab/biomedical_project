@@ -4,17 +4,17 @@
 #include <Adafruit_MLX90614.h>
 #include <PulseSensorPlayground.h>
 
-#define PULSE_PIN        (PIN_A0)      // analog
-#define BUZZER_PIN       (6)           // digital
-#define RESTART_PIN      (9)           // digital
-#define USS_TRIG_PIN     (2)           // digital
-#define USS_ECHO_PIN     (3)           // digital
-#define LED_PULSE_PIN    (10)          // digital
-#define LED_NORM_PIN     (8)           // digital
-#define LED_WARN_PIN     (7)           // digital
-#define LED_READY_PIN    (4)           // digital
-#define LED_ERROR_PIN    (5)           // digital
-#define LED_STATE_PIN    (LED_BUILTIN) // digital
+#define PULSE_PIN        (PIN_A0)    // analog
+#define BUZZER_PIN       (6)         // digital
+#define RESET_PIN        (9)         // digital
+#define USS_TRIG_PIN     (2)         // digital
+#define USS_ECHO_PIN     (3)         // digital
+#define LED_PULSE_PIN    (10)        // digital
+#define LED_STATE_PIN    (11)        // digital
+#define LED_NORM_PIN     (8)         // digital
+#define LED_WARN_PIN     (7)         // digital
+#define LED_READY_PIN    (4)         // digital
+#define LED_ERROR_PIN    (5)         // digital
 
 #define USS_DURATION     (10)        // us
 #define USS_ECHO_TIMEOUT (30 * 1000) // ms
@@ -119,6 +119,65 @@ void display_reset() {
 	digitalWrite(LED_PULSE_PIN, LOW);
 }
 
+void pulse_init() {
+	pulse.analogInput(PULSE_PIN);
+	pulse.blinkOnPulse(LED_PULSE_PIN);
+	pulse.setThreshold(PULSE_THRESHOLD);
+	while (!pulse.begin()) {
+		state_set(STATE_ERROR);
+		Serial.println("Pulse Sensor init failed!");
+		digitalWrite(LED_ERROR_PIN, HIGH);
+		delay(250);
+	}
+}
+
+void mlx_init() {
+	while (!mlx.begin()) {
+		state_set(STATE_ERROR);
+		Serial.println("MLX init failed!");
+		digitalWrite(LED_ERROR_PIN, HIGH);
+		delay(250);
+	}
+}
+
+void lcd_init() {
+	lcd.begin(PIN_WIRE_SDA, PIN_WIRE_SCL, false);
+	lcd.backlight();
+	lcd.createChar(0, heart_char_small);
+	lcd.createChar(1, heart_char_big);
+}
+
+double current_temp = 0.0;
+int current_bpm = 0;
+unsigned long pulse_start_time = 0;
+unsigned long output_start_time = 0;
+
+void sensors_reset() {
+	current_bpm = 0;
+	current_temp = 0.0;
+	pulse_start_time = 0;
+	output_start_time = 0;
+	// hard reset pulse sensor
+	pulse.pause();
+	delay(300);
+	pulse_init();
+	pulse.pause();
+}
+
+void check_reset() {
+	if (digitalRead(RESET_PIN) == LOW) {
+		// debounce
+		delay(50);
+		if (digitalRead(RESET_PIN) == LOW) {
+			digitalWrite(LED_ERROR_PIN, HIGH);
+			// wait release
+			while (digitalRead(RESET_PIN) == LOW);
+			digitalWrite(LED_ERROR_PIN, LOW);
+			state_set(STATE_RESET);
+		}
+	}
+}
+
 double uss_get_distance() {
 	digitalWrite(USS_TRIG_PIN, HIGH);
 	delayMicroseconds(USS_DURATION);
@@ -140,52 +199,18 @@ void setup() {
 	pinMode(USS_TRIG_PIN, OUTPUT);
 	pinMode(USS_ECHO_PIN, INPUT);
 	pinMode(LED_PULSE_PIN, OUTPUT);
-	pinMode(RESTART_PIN, INPUT_PULLUP);
+	pinMode(RESET_PIN, INPUT_PULLUP);
 
-	pulse.analogInput(PULSE_PIN);
-	pulse.blinkOnPulse(LED_PULSE_PIN);
-	pulse.setThreshold(PULSE_THRESHOLD);
-	while (!pulse.begin()) {
-		state_set(STATE_ERROR);
-		Serial.println("Pulse Sensor init failed!");
-		digitalWrite(LED_ERROR_PIN, HIGH);
-		delay(250);
-	}
-
-	while (!mlx.begin()) {
-		state_set(STATE_ERROR);
-		Serial.println("MLX init failed!");
-		digitalWrite(LED_ERROR_PIN, HIGH);
-		delay(250);
-	}
-
-	lcd.begin(PIN_WIRE_SDA, PIN_WIRE_SCL, false);
-	lcd.backlight();
-	lcd.createChar(0, heart_char_small);
-	lcd.createChar(1, heart_char_big);
-
+	state_set(STATE_INIT);
+	mlx_init();
+	lcd_init();
+	pulse_init();
 	display_reset();
 	state_set(STATE_READY);
 }
 
-double current_temp = 0.0;
-int current_bpm = 0;
-bool pulse_new = false;
-unsigned long pulse_start_time = 0;
-unsigned long output_start_time = 0;
-
 void loop() {
-	if (digitalRead(RESTART_PIN) == LOW) {
-		// debounce
-		delay(50);
-		if (digitalRead(RESTART_PIN) == LOW) {
-			digitalWrite(LED_ERROR_PIN, HIGH);
-			state_set(STATE_RESET);
-			// wait release
-			while (digitalRead(RESTART_PIN) == LOW);
-			digitalWrite(LED_ERROR_PIN, LOW);
-		}
-	}
+	check_reset();
 	switch (state_current) {
 	case STATE_INIT:
 		// just wait and hope for the best
@@ -197,11 +222,7 @@ void loop() {
 		delay(250);
 		break;
 	case STATE_RESET:
-		current_temp = 0.0;
-		current_bpm = 0;
-		pulse_new = false;
-		pulse_start_time = 0;
-		output_start_time = 0;
+		sensors_reset();
 		display_reset();
 		state_set(STATE_READY);
 		break;
@@ -211,6 +232,7 @@ void loop() {
 		if (distance > 0 && distance <= USS_MIN_DISTANCE) {
 			digitalWrite(LED_READY_PIN, LOW);
 			melody_play(melody_detect, melody_detect_durations, LENGTH(melody_detect));
+			sensors_reset();
 			display_reset();
 			state_set(STATE_RUN_TEMP);
 			break;
@@ -228,20 +250,15 @@ void loop() {
 		if (current_temp >= TEMP_HIGH)    lcd.print("HIGH");
 		else if (current_temp < TEMP_LOW) lcd.print(" LOW");
 		else                              lcd.print("NORM");
-		pulse_new = true;
 		pulse_start_time = millis();
 		state_set(STATE_RUN_PULSE);
 		break;
 	case STATE_RUN_PULSE:
+		if (pulse.isPaused()) pulse.resume();
 		lcd.setCursor(0, 1);
 		lcd.print("  Measuring...  ");
 		if (pulse.sawStartOfBeat()) {
 			current_bpm = pulse.getBeatsPerMinute();
-			if (pulse_new) {
-				pulse_new = false;
-				pulse_start_time = millis();
-				break;
-			}
 			pulse_start_time = millis();
 			lcd.setCursor(0, 1);
 			lcd.print("BPM:  ");
@@ -251,6 +268,7 @@ void loop() {
 			if (current_bpm > PULSE_BPM_HIGH)     lcd.print("HIGH");
 			else if (current_bpm < PULSE_BPM_LOW) lcd.print(" LOW");
 			else                                  lcd.print("NORM");
+			pulse.pause();
 			state_set(STATE_RUN_OUTPUT);
 			break;
 		}
@@ -258,6 +276,7 @@ void loop() {
 			current_bpm = 0;
 			lcd.setCursor(0, 1);
 			lcd.print("  No pulse! :(  ");
+			pulse.pause();
 			state_set(STATE_RUN_OUTPUT);
 		}
 		break;
@@ -273,9 +292,7 @@ void loop() {
 			}
 		}
 		if (millis() - output_start_time > 5000) {
-			output_start_time = 0;
-			display_reset();
-			state_set(STATE_READY);
+			state_set(STATE_RESET);
 		}
 		break;
 	}
